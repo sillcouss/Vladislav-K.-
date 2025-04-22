@@ -1053,3 +1053,560 @@ _______________________________
 - Вертикальное партиционирование редко используемых полей.
 - Горизонтальное партиционирование по временным периодам.
 - Создание материализованных представлений для сложных запросов.
+
+
+# 4. Физическая структура базы данных
+
+## 4.1. Выбор системы управления базами данных (СУБД)
+
+### 4.1.1. Критерии выбора СУБД для поликлиники
+
+#### Требования к производительности:
+
+- Поддержка высоких нагрузок в часы пик (утренние часы приема).
+- Быстрое выполнение сложных запросов к истории болезней.
+- Эффективная работа с составными индексами.
+
+#### Требования к надежности:
+
+- Механизмы автоматического восстановления после сбоев.
+- Поддержка горячего резервирования.
+- Транзакционная целостность данных.
+
+#### Требования к безопасности:
+
+- Шифрование данных на уровне полей.
+- Подробная система разграничения прав доступа.
+- Аудит всех операций с данными.
+
+#### Специфические медицинские требования:
+
+- Поддержка временных рядов для медицинских показателей.
+- Возможность хранения неструктурированных данных (снимки, сканы).
+- Специальные типы данных для медицинской информации.
+
+### 4.1.2. Сравнительный анализ СУБД
+
+#### PostgreSQL:
+
+- **Преимущества:**
+  - Полноценная объектно-реляционная модель.
+  - Поддержка JSON и XML для медицинских документов.
+  - Расширения для временных рядов и геоданных.
+- **Недостатки:**
+  - Требовательность к ресурсам.
+  - Сложность настройки для высоких нагрузок.
+
+#### Microsoft SQL Server:
+
+- **Преимущества:**
+  - Интеграция с другими продуктами Microsoft.
+  - Отличные инструменты анализа данных.
+  - Поддержка сложных вычислений.
+- **Недостатки:**
+  - Высокая стоимость лицензий.
+  - Привязка к экосистеме Microsoft.
+
+#### MySQL:
+
+- **Преимущества:**
+  - Высокая производительность простых запросов.
+  - Низкие требования к ресурсам.
+  - Широкая распространенность.
+- **Недостатки:**
+  - Ограниченная функциональность.
+  - Проблемы с масштабированием.
+
+#### Oracle Database:
+
+- **Преимущества:**
+  - Лидер по возможностям и надежности.
+  - Встроенные механизмы шифрования.
+  - Поддержка распределенных баз данных.
+- **Недостатки:**
+  - Экстремально высокая стоимость.
+  - Сложность администрирования.
+
+### 4.1.3. Обоснование выбора PostgreSQL
+
+Для системы районной поликлиники выбран PostgreSQL как оптимальный баланс между:
+
+- Бесплатностью и открытостью кода.
+- Богатой функциональностью.
+- Возможностями масштабирования.
+- Поддержкой медицинских стандартов.
+- Надежностью и безопасностью данных.
+
+## 4.2. Физическая реализация таблиц
+
+### 4.2.1. DDL-скрипты создания таблиц
+
+#### Таблица `PATIENTS`:
+
+CREATE TABLE patients (
+    patient_id SERIAL PRIMARY KEY,
+    last_name VARCHAR(50) NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    middle_name VARCHAR(50),
+    birth_date DATE NOT NULL CHECK (birth_date > '1900-01-01'),
+    gender CHAR(1) NOT NULL CHECK (gender IN ('M','F')),
+    reg_address JSONB NOT NULL,
+    fact_address JSONB,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(100) CHECK (email LIKE '%@%.%'),
+    oms_number VARCHAR(20) NOT NULL UNIQUE,
+    oms_company VARCHAR(100) NOT NULL,
+    oms_expiry_date DATE NOT NULL,
+    passport_series VARCHAR(4),
+    passport_number VARCHAR(6),
+    passport_issued_by TEXT,
+    passport_issue_date DATE,
+    snils VARCHAR(14) UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    visits_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_patients_name ON patients (last_name, first_name);
+CREATE INDEX idx_patients_oms ON patients (oms_number);
+CREATE INDEX idx_patients_birth_date ON patients (birth_date);
+
+Таблица MEDICAL_CARDS:
+
+CREATE TABLE medical_cards (
+    card_id SERIAL PRIMARY KEY,
+    patient_id INTEGER UNIQUE NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    open_date DATE NOT NULL CHECK (open_date >= '2000-01-01'),
+    close_date DATE CHECK (close_date IS NULL OR close_date >= open_date),
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','ARCHIVED','BLOCKED')),
+    district_id INTEGER REFERENCES districts(district_id),
+    attending_doctor_id INTEGER REFERENCES doctors(doctor_id),
+    blood_type VARCHAR(2) CHECK (blood_type IN ('I','II','III','IV','UNKNOWN')),
+    rh_factor VARCHAR(1) CHECK (rh_factor IN ('+','-','UNKNOWN')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_dates CHECK (close_date IS NULL OR close_date >= open_date)
+);
+
+CREATE INDEX idx_medical_cards_patient ON medical_cards(patient_id);
+CREATE INDEX idx_medical_cards_status ON medical_cards(status);
+CREATE INDEX idx_medical_cards_doctor ON medical_cards(attending_doctor_id);
+
+## 4.3. Индексы и оптимизация запросов
+
+### 4.3.1. Стратегия индексирования
+
+#### Базовые индексы:
+
+- Все первичные ключи (автоматически индексируются).
+- Все внешние ключи (для ускорения JOIN-операций).
+- Уникальные поля (OMS, СНИЛС, паспорт).
+
+#### Составные индексы:
+
+- Для частых запросов по ФИО и дате рождения.
+- Для поиска пациентов по участку и врачу.
+- Для анализа обращений по датам и врачам.
+
+#### Специальные индексы:
+
+- GIN-индексы для JSON-данных (адреса).
+- Частичные индексы для активных записей.
+- Индексы по выражениям (например, возраст).
+
+### 4.3.2. Примеры создания оптимизированных индексов
+
+Для быстрого поиска пациентов:
+
+CREATE INDEX idx_patient_search ON patients 
+USING gin ((last_name || ' ' || first_name || ' ' || COALESCE(middle_name, '')) gin_trgm_ops);
+
+Для временных запросов:
+
+CREATE INDEX idx_visits_date_doctor ON visits (visit_date, doctor_id) 
+WHERE status = 'COMPLETED';
+
+Для медицинской аналитики:
+
+CREATE INDEX idx_diagnoses_icd_date ON diagnoses (icd10_code, diagnosis_date) 
+INCLUDE (patient_id);
+
+## 4.4. Хранимые процедуры и триггеры
+
+### 4.4.1. Критические хранимые процедуры
+
+#### Регистрация нового пациента:
+
+CREATE OR REPLACE FUNCTION register_patient(
+    p_last_name VARCHAR,
+    p_first_name VARCHAR,
+    p_birth_date DATE,
+    p_gender CHAR,
+    p_oms_number VARCHAR
+) RETURNS INTEGER AS $$
+DECLARE
+    new_patient_id INTEGER;
+BEGIN
+    -- Проверка уникальности ОМС
+    IF EXISTS (SELECT 1 FROM patients WHERE oms_number = p_oms_number) THEN
+        RAISE EXCEPTION 'Пациент с таким номером ОМС уже зарегистрирован';
+    END IF;
+    
+    -- Вставка нового пациента
+    INSERT INTO patients (
+        last_name, first_name, birth_date, gender, oms_number
+    ) VALUES (
+        p_last_name, p_first_name, p_birth_date, p_gender, p_oms_number
+    ) RETURNING patient_id INTO new_patient_id;
+    
+    -- Создание медицинской карты
+    INSERT INTO medical_cards (patient_id, open_date)
+    VALUES (new_patient_id, CURRENT_DATE);
+    
+    RETURN new_patient_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+Обновление счетчика обращений:
+
+CREATE OR REPLACE FUNCTION update_visits_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        UPDATE patients 
+        SET visits_count = visits_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE patient_id = NEW.patient_id;
+    ELSIF TG_OP = 'DELETE' THEN
+        UPDATE patients 
+        SET visits_count = visits_count - 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE patient_id = OLD.patient_id;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_update_visits_count
+AFTER INSERT OR DELETE ON visits
+FOR EACH ROW EXECUTE FUNCTION update_visits_count();
+
+## 4.5. Разграничение прав доступа
+
+### 4.5.1. Ролевая модель доступа
+
+#### Администратор БД (db_admin):
+- Полный доступ ко всем объектам.
+- Право создавать и изменять схемы.
+- Управление пользователями и ролями.
+
+#### Регистратор (registrar):
+- Чтение/запись таблиц пациентов и расписания.
+- Ограниченный доступ к медицинским данным.
+- Нет доступа к финансовой информации.
+
+#### Врач (doctor):
+- Полный доступ к медицинским картам своих пациентов.
+- Ограниченный доступ к другим пациентам.
+- Возможность создавать диагнозы и назначения.
+
+#### Медсестра (nurse):
+- Просмотр назначений.
+- Ввод результатов процедур.
+- Нет доступа к редактированию диагнозов.
+
+### 4.5.2. Примеры назначения прав
+
+-- Создание роли врача
+CREATE ROLE doctor_role NOLOGIN;
+GRANT CONNECT ON DATABASE polyclinic TO doctor_role;
+
+-- Назначение прав на таблицы
+GRANT SELECT, INSERT, UPDATE ON medical_cards TO doctor_role;
+GRANT SELECT, INSERT, UPDATE ON visits TO doctor_role;
+GRANT SELECT, INSERT, UPDATE ON diagnoses TO doctor_role;
+GRANT SELECT ON patients TO doctor_role;
+
+-- Создание пользователя
+CREATE USER dr_ivanov WITH PASSWORD 'secure123';
+GRANT doctor_role TO dr_ivanov;
+
+-- Ограничение доступа только к своим пациентам
+CREATE POLICY doctor_patients_policy ON medical_cards
+FOR ALL TO doctor_role
+USING (attending_doctor_id = current_user_id());
+
+
+# 5. Реализация проекта в среде PostgreSQL
+
+## 5.1. Создание таблиц
+
+### 5.1.1. Разработка DDL-скриптов
+
+Для реализации физической модели базы данных поликлиники в PostgreSQL разработаны следующие скрипты создания таблиц:
+
+-- Создание схемы базы данных
+CREATE SCHEMA polyclinic;
+SET search_path TO polyclinic;
+
+-- Таблица участков
+CREATE TABLE districts (
+    district_id SERIAL PRIMARY KEY,
+    district_number VARCHAR(10) NOT NULL UNIQUE,
+    territory_description TEXT NOT NULL,
+    head_doctor_id INT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Таблица сотрудников
+CREATE TABLE employees (
+    employee_id SERIAL PRIMARY KEY,
+    last_name VARCHAR(50) NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    middle_name VARCHAR(50),
+    position VARCHAR(100) NOT NULL,
+    hire_date DATE NOT NULL,
+    dismissal_date DATE,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE'
+);
+
+-- Таблица врачей (наследуется от сотрудников)
+CREATE TABLE doctors (
+    doctor_id INT PRIMARY KEY REFERENCES employees(employee_id),
+    specialization VARCHAR(100) NOT NULL,
+    qualification VARCHAR(50) NOT NULL,
+    license_number VARCHAR(50) UNIQUE,
+    room_number VARCHAR(10) NOT NULL,
+    schedule JSONB NOT NULL
+) INHERITS (employees);
+
+-- Таблица пациентов
+CREATE TABLE patients (
+    patient_id SERIAL PRIMARY KEY,
+    last_name VARCHAR(50) NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    middle_name VARCHAR(50),
+    birth_date DATE NOT NULL CHECK (birth_date > '1900-01-01'),
+    gender CHAR(1) NOT NULL CHECK (gender IN ('M','F')),
+    reg_address JSONB NOT NULL,
+    fact_address JSONB,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(100) CHECK (email LIKE '%@%.%'),
+    oms_number VARCHAR(20) NOT NULL UNIQUE,
+    oms_company VARCHAR(100) NOT NULL,
+    oms_expiry_date DATE NOT NULL,
+    passport_data JSONB,
+    snils VARCHAR(14) UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+5.1.2. Создание связей между таблицами
+
+-- Добавление внешних ключей
+ALTER TABLE districts 
+ADD CONSTRAINT fk_head_doctor 
+FOREIGN KEY (head_doctor_id) REFERENCES doctors(doctor_id);
+
+-- Таблица медицинских карт
+CREATE TABLE medical_cards (
+    card_id SERIAL PRIMARY KEY,
+    patient_id INT UNIQUE NOT NULL REFERENCES patients(patient_id) 
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    open_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    close_date DATE,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' 
+        CHECK (status IN ('ACTIVE','ARCHIVED','BLOCKED')),
+    district_id INT REFERENCES districts(district_id),
+    attending_doctor_id INT REFERENCES doctors(doctor_id),
+    blood_type VARCHAR(2) CHECK (blood_type IN ('I','II','III','IV','UNKNOWN')),
+    rh_factor VARCHAR(1) CHECK (rh_factor IN ('+','-','UNKNOWN')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_dates CHECK (close_date IS NULL OR close_date >= open_date)
+
+5.2. Создание запросов
+5.2.1. Типовые SQL-запросы системы
+1. Поиск пациентов по ФИО и дате рождения:
+
+CREATE OR REPLACE FUNCTION search_patients(
+    p_last_name VARCHAR DEFAULT NULL,
+    p_first_name VARCHAR DEFAULT NULL,
+    p_birth_date DATE DEFAULT NULL
+) RETURNS SETOF patients AS $$
+BEGIN
+    RETURN QUERY
+    SELECT * FROM patients
+    WHERE (p_last_name IS NULL OR last_name ILIKE p_last_name || '%')
+      AND (p_first_name IS NULL OR first_name ILIKE p_first_name || '%')
+      AND (p_birth_date IS NULL OR birth_date = p_birth_date)
+    ORDER BY last_name, first_name
+    LIMIT 100;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+2. Получение полной истории обращений пациента:
+
+CREATE OR REPLACE FUNCTION get_patient_history(
+    p_patient_id INT
+) RETURNS TABLE (
+    visit_date TIMESTAMPTZ,
+    doctor_name TEXT,
+    specialization VARCHAR(100),
+    complaints TEXT,
+    diagnosis TEXT,
+    prescriptions TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        v.visit_date,
+        d.last_name || ' ' || d.first_name || ' ' || COALESCE(d.middle_name, '') AS doctor_name,
+        d.specialization,
+        v.complaints,
+        string_agg(dg.icd10_code || ' - ' || dg.diagnosis_name, ', ') AS diagnosis,
+        string_agg(p.prescription_text, '; ') AS prescriptions
+    FROM visits v
+    JOIN doctors d ON v.doctor_id = d.doctor_id
+    LEFT JOIN diagnoses dg ON v.visit_id = dg.visit_id
+    LEFT JOIN prescriptions p ON v.visit_id = p.visit_id
+    WHERE v.patient_id = p_patient_id
+    GROUP BY v.visit_id, v.visit_date, d.last_name, d.first_name, d.middle_name, d.specialization, v.complaints
+    ORDER BY v.visit_date DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+# 5.3. Разработка интерфейса
+
+## 5.3.1. Архитектура клиентского приложения
+
+**Frontend:**
+
+- Веб-интерфейс на React.js
+- Мобильное приложение на React Native
+- Административная панель на Vue.js
+
+**Backend:**
+
+- RESTful API на Node.js Express
+- WebSocket для реальных обновлений
+- Интеграция с PostgreSQL через pg-promise
+
+## 5.3.2. Пример API-эндпоинтов
+
+1. Эндпоинт регистрации пациента:
+
+router.post('/api/patients', authenticate('registrar'), async (req, res) => {
+  try {
+    const { lastName, firstName, birthDate, omsNumber } = req.body;
+    
+    const patient = await db.query(
+      'SELECT * FROM register_patient($1, $2, $3, $4)',
+      [lastName, firstName, birthDate, omsNumber]
+    );
+    
+    res.status(201).json(patient);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+2. Эндпоинт поиска пациентов:
+
+router.get('/api/patients/search', authenticate(['doctor','registrar']), async (req, res) => {
+  try {
+    const { lastName, firstName, birthDate, omsNumber } = req.query;
+    
+    const patients = await db.query(
+      'SELECT * FROM search_patients($1, $2, $3, $4)',
+      [lastName, firstName, birthDate, omsNumber]
+    );
+    
+    res.json(patients);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+5.4. Назначение прав доступа
+5.4.1. Ролевая модель безопасности
+
+-- Создание ролей
+CREATE ROLE polyclinic_admin WITH NOLOGIN;
+CREATE ROLE polyclinic_doctor WITH NOLOGIN;
+CREATE ROLE polyclinic_registrar WITH NOLOGIN;
+CREATE ROLE polyclinic_nurse WITH NOLOGIN;
+
+-- Назначение прав администратору
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA polyclinic TO polyclinic_admin;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA polyclinic TO polyclinic_admin;
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA polyclinic TO polyclinic_admin;
+
+-- Назначение прав врачам
+GRANT SELECT, INSERT, UPDATE ON 
+    patients, medical_cards, visits, diagnoses, prescriptions 
+TO polyclinic_doctor;
+
+GRANT SELECT ON 
+    doctors, employees, districts 
+TO polyclinic_doctor;
+
+-- Политика доступа к данным пациентов
+CREATE POLICY doctor_patient_policy ON medical_cards
+    FOR ALL TO polyclinic_doctor
+    USING (attending_doctor_id = current_user_id());
+
+5.5. Создание индексов
+5.5.1. Оптимизация производительности
+
+-- Индексы для таблицы пациентов
+CREATE INDEX idx_patients_name_trgm ON patients 
+    USING gin (last_name gin_trgm_ops, first_name gin_trgm_ops);
+    
+CREATE INDEX idx_patients_oms ON patients (oms_number);
+CREATE INDEX idx_patients_birth_date ON patients (birth_date);
+CREATE INDEX idx_patients_phone ON patients (phone);
+
+-- Индексы для таблицы обращений
+CREATE INDEX idx_visits_patient_date ON visits (patient_id, visit_date DESC);
+CREATE INDEX idx_visits_doctor_date ON visits (doctor_id, visit_date DESC);
+CREATE INDEX idx_visits_status_date ON visits (status, visit_date);
+
+-- Частичный индекс для активных записей
+CREATE INDEX idx_medical_cards_active ON medical_cards (patient_id)
+    WHERE status = 'ACTIVE';
+
+5.6. Разработка стратегии резервного копирования
+5.6.1. Комплексная стратегия бэкапа
+
+1. Ежедневные полные бэкапы:
+
+#!/bin/bash
+DATE=$(date +%Y-%m-%d)
+pg_dump -Fc -U backup_user -d polyclinic -f /backups/full_$DATE.dump
+
+2. Почасовые WAL-архивы:
+
+# postgresql.conf
+wal_level = replica
+archive_mode = on
+archive_command = 'cp %p /backups/wal/%f'
+
+3. Репликация в standby-сервер:
+
+# postgresql.conf
+hot_standby = on
+primary_conninfo = 'host=primary.polyclinic.local port=5432 user=replica password=secret'
+
+4. Скрипт восстановления:
+
+#!/bin/bash
+pg_restore -U admin -d polyclinic -Fc /backups/full_2023-11-15.dump
+
+5. Мониторинг целостности бэкапов:
+
+-- Проверка последнего бэкапа
+SELECT pg_is_in_backup(), 
+       pg_backup_start_time(),
+       pg_is_wal_replay_paused();
